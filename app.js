@@ -160,6 +160,7 @@ function doLogout() {
   currentUser = null;
   document.getElementById("scr-app").classList.add("hidden");
   document.getElementById("bottomnav").classList.add("hidden");
+  document.getElementById("prevnextbar").classList.add("hidden");
   document.getElementById("scr-paywall").classList.add("hidden");
   document.getElementById("scr-auth").classList.add("active");
   location.reload();
@@ -191,6 +192,7 @@ const OPERATOR_INFO = {
 function showPaywall() {
   document.getElementById("scr-app").classList.add("hidden");
   document.getElementById("bottomnav").classList.add("hidden");
+  document.getElementById("prevnextbar").classList.add("hidden");
   document.getElementById("scr-paywall").classList.remove("hidden");
   setPayZone("ci");
   setOperator("wave");
@@ -323,6 +325,7 @@ function finalizePayment(entry) {
 function showMainApp() {
   document.getElementById("scr-app").classList.remove("hidden");
   document.getElementById("bottomnav").classList.remove("hidden");
+  document.getElementById("prevnextbar").classList.remove("hidden");
   history.replaceState({ layer: "tab", screen: "map" }, "", "#map");
   document.getElementById("me-nom").textContent = currentUser.nom;
   document.getElementById("me-pseudo").textContent = "@" + currentUser.pseudo;
@@ -395,6 +398,19 @@ function goScreen(name, fromPop) {
   if (!fromPop) {
     history.replaceState({ layer: "tab", screen: name }, "", "#" + name);
   }
+  currentTabName = name;
+}
+const TAB_ORDER = ["map", "contacts", "statuses", "calls", "messages", "settings"];
+let currentTabName = "map";
+function goPrevTab() {
+  const i = TAB_ORDER.indexOf(currentTabName);
+  const prev = TAB_ORDER[(i - 1 + TAB_ORDER.length) % TAB_ORDER.length];
+  goScreen(prev);
+}
+function goNextTab() {
+  const i = TAB_ORDER.indexOf(currentTabName);
+  const next = TAB_ORDER[(i + 1) % TAB_ORDER.length];
+  goScreen(next);
 }
 function goHomeFromAnywhere() {
   // Ferme toute fenetre ouverte par-dessus (chat/admin) puis revient a l'accueil

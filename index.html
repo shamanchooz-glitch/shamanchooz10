@@ -31,7 +31,7 @@ a{color:inherit}
 .hidden{display:none!important}
 
 /* ===== SHELL ===== */
-#app{max-width:520px;margin:0 auto;min-height:100vh;background:var(--bg);position:relative;padding-bottom:78px}
+#app{max-width:520px;margin:0 auto;min-height:100vh;background:var(--bg);position:relative;padding-bottom:118px}
 .topbar{position:sticky;top:0;z-index:200;background:rgba(255,255,255,0.92);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);padding:14px 18px;display:flex;align-items:center;justify-content:space-between}
 .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:1.05rem;letter-spacing:-0.01em}
 .brand-mark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--indigo),var(--teal));display:flex;align-items:center;justify-content:center;font-size:1.1rem;box-shadow:0 4px 14px rgba(74,58,255,0.35)}
@@ -49,6 +49,8 @@ a{color:inherit}
 
 /* ===== BOTTOM NAV ===== */
 .bottomnav{position:fixed;left:0;right:0;bottom:0;max-width:520px;margin:0 auto;background:rgba(255,255,255,0.97);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:flex;z-index:300;padding:6px 4px calc(6px + env(safe-area-inset-bottom))}
+.prevnextbar{position:fixed;left:0;right:0;bottom:64px;max-width:520px;margin:0 auto;display:flex;gap:8px;padding:0 10px;z-index:299}
+.pn-btn{flex:1;padding:9px 0;border-radius:99px;border:1px solid var(--line2);background:rgba(255,255,255,0.95);backdrop-filter:blur(10px);font-size:0.76rem;font-weight:700;color:var(--txt2);box-shadow:0 4px 14px rgba(0,0,0,0.08)}
 .nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 2px;background:none;border:none;cursor:pointer;color:var(--txt3);font-size:0.66rem;font-weight:700;border-radius:12px;position:relative}
 .nav-btn .ni{font-size:1.25rem}
 .nav-btn.active{color:var(--indigo)}
@@ -218,6 +220,7 @@ a{color:inherit}
         <div class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Connexion</div>
         <div class="auth-tab" id="tab-register" onclick="switchAuthTab('register')">Inscription</div>
       </div>
+      <button class="btn btn-ghost" style="margin-bottom:20px" onclick="openAdminLogin()">🔐 Espace administrateur</button>
 
       <div id="pane-login">
         <label class="lbl">Pseudo ou telephone</label>
@@ -245,8 +248,7 @@ a{color:inherit}
         <button class="btn btn-primary" style="margin-top:18px" onclick="doRegister()">Creer mon compte</button>
         <p class="muted center" style="margin-top:12px">En creant un compte vous acceptez que votre position ne soit jamais visible par un autre membre tant que vous n'avez pas accepte sa demande.</p>
       </div>
-      <button class="btn btn-ghost" style="margin-top:26px" onclick="openAdminLogin()">🔐 Espace administrateur</button>
-      <button class="btn btn-ghost" style="margin-top:10px" onclick="attemptQuitApp()">🚪 Quitter</button>
+      <button class="btn btn-ghost" style="margin-top:16px" onclick="attemptQuitApp()">🚪 Quitter</button>
     </div>
   </div>
 
@@ -572,6 +574,12 @@ a{color:inherit}
       <button class="btn btn-danger" onclick="doLogout()">Se deconnecter</button>
       <p class="muted center" style="margin-top:16px">Compte cree le <span id="me-created"></span></p>
     </div>
+  </div>
+
+  <!-- ============ FLECHES PRECEDENT / SUIVANT ============ -->
+  <div id="prevnextbar" class="prevnextbar hidden">
+    <button class="pn-btn" onclick="goPrevTab()">◀ Precedent</button>
+    <button class="pn-btn" onclick="goNextTab()">Suivant ▶</button>
   </div>
 
   <!-- ============ BOTTOM NAV ============ -->
