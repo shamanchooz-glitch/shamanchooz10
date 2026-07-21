@@ -1,4 +1,564 @@
-const CACHE_NAME = "shaman-chooz-v5"; // changez ce numero a chaque mise a jour du code
+/* =========================================================================
+   PROCHE — App de localisation et communication a consentement mutuel
+   Backend : Firebase Realtime Database (REST). Hebergement : fichiers statiques
+   (Cloudflare Pages/Workers).
+   ========================================================================= */
+
+// ------------------------------------------------------------------
+// 1) CONFIGURATION — a completer avec VOTRE projet Firebase
+// ------------------------------------------------------------------
+// Creez un projet gratuit sur https://console.firebase.google.com
+// -> Realtime Database -> Creer une base -> demarrer en mode "test"
+// -> copiez l'URL (ex: https://mon-projet-xxxxx-default-rtdb.firebaseio.com)
+const FB = "https://proche-app-default-rtdb.firebaseio.com";
+
+// ------------------------------------------------------------------
+// 2) ETAT GLOBAL
+// ------------------------------------------------------------------
+let currentUser = null;      // {id, pseudo, nom, tel, mdpHash, awayMode, awayMsg, createdAt}
+let map = null;
+let myMarker = null;
+let contactMarkers = {};     // uid -> L.marker
+let watchId = null;
+let sharingLocation = false;
+let currentChatUid = null;
+let currentCallId = null;
+let currentCallPeer = null;  // {uid, nom}
+let currentCallType = null;  // 'audio' | 'video'
+let pc = null;               // RTCPeerConnection
+let localStream = null;
+let remoteStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let isRecording = false;
+let candidateQueue = [];
+let callPollTimer = null;
+let mapPollTimer = null;
+let contactsPollTimer = null;
+let messagesPollTimer = null;
+let incomingCallPollTimer = null;
+let ringtoneTimer = null;
+let seenMessageIds = {};
+const STUN = { iceServers: [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" }
+]};
+
+// ------------------------------------------------------------------
+// 3) UTILITAIRES FIREBASE (REST, sans SDK — coherent, leger, sans cle)
+// ------------------------------------------------------------------
+function fbGet(path, cb) {
+  fetch(FB + path + ".json")
+    .then(r => r.json())
+    .then(d => cb(d))
+    .catch(() => cb(null));
+}
+function fbSet(path, data, cb) {
+  fetch(FB + path + ".json", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  }).then(r => r.ok).then(ok => cb && cb(ok)).catch(() => cb && cb(false));
+}
+function fbPatch(path, data, cb) {
+  fetch(FB + path + ".json", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data)
+  }).then(r => r.ok).then(ok => cb && cb(ok)).catch(() => cb && cb(false));
+}
+function fbDelete(path, cb) {
+  fetch(FB + path + ".json", { method: "DELETE" })
+    .then(r => r.ok).then(ok => cb && cb(ok)).catch(() => cb && cb(false));
+}
+function genUid(prefix) {
+  return (prefix||"") + Date.now() + "-" + Math.random().toString(36).slice(2, 9);
+}
+function hashPwd(pwd) {
+  return btoa(unescape(encodeURIComponent(pwd)));
+}
+function nowTs() { return Date.now(); }
+function convoId(a, b) { return [a, b].sort().join("__"); }
+function initials(name) {
+  if (!name) return "?";
+  return name.trim().split(/\s+/).slice(0,2).map(w => w[0].toUpperCase()).join("");
+}
+function showToast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.classList.remove("show"), 2600);
+}
+function fmtTime(ts) {
+  const d = new Date(ts);
+  return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+function gv(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
+
+// ------------------------------------------------------------------
+// 4) AUTHENTIFICATION
+// ------------------------------------------------------------------
+function switchAuthTab(which) {
+  document.getElementById("tab-login").classList.toggle("active", which === "login");
+  document.getElementById("tab-register").classList.toggle("active", which === "register");
+  document.getElementById("pane-login").classList.toggle("hidden", which !== "login");
+  document.getElementById("pane-register").classList.toggle("hidden", which !== "register");
+}
+
+function doRegister() {
+  const nom = gv("rg-nom"), pseudo = gv("rg-pseudo"), tel = gv("rg-tel"), mdp = gv("rg-mdp");
+  if (!nom || !pseudo || !tel || !mdp) { showToast("Remplissez tous les champs"); return; }
+  if (mdp.length < 6) { showToast("Mot de passe : 6 caracteres minimum"); return; }
+  fbGet("/pr_users", (all) => {
+    const users = all ? Object.values(all) : [];
+    if (users.find(u => u && u.pseudo === pseudo)) { showToast("Ce pseudo est deja pris"); return; }
+    const id = genUid("U-");
+    const user = {
+      id, nom, pseudo, tel,
+      mdpHash: hashPwd(mdp),
+      awayMode: false,
+      awayMsg: "Je suis actuellement occupe(e) ou absent(e). Votre demande a bien ete recue et sera traitee sous 72h. Merci de votre comprehension.",
+      createdAt: nowTs(),
+      blocked: false,
+      paymentStatus: "unpaid",
+      bio: "", photo: null,
+      bizName: "", bizDesc: "", bizHours: "", bizAddr: ""
+    };
+    fbSet("/pr_users/" + id, user, (ok) => {
+      if (!ok) { showToast("Erreur reseau. Verifiez votre configuration Firebase."); return; }
+      localStorage.setItem("pr_current", JSON.stringify(user));
+      currentUser = user;
+      showToast("Bienvenue " + nom + " 👋");
+      enterApp();
+    });
+  });
+}
+
+function doLogin() {
+  const pseudo = gv("lg-pseudo"), mdp = gv("lg-mdp");
+  if (!pseudo || !mdp) { showToast("Remplissez tous les champs"); return; }
+  const h = hashPwd(mdp);
+  fbGet("/pr_users", (all) => {
+    const users = all ? Object.values(all) : [];
+    const found = users.find(u => u && (u.pseudo === pseudo || u.tel === pseudo) && u.mdpHash === h);
+    if (!found) { showToast("Identifiants incorrects"); return; }
+    if (found.blocked) { showToast("Ce compte a ete bloque par l'administrateur"); return; }
+    currentUser = found;
+    localStorage.setItem("pr_current", JSON.stringify(found));
+    showToast("Bon retour, " + found.nom + " 👋");
+    enterApp();
+  });
+}
+
+function doLogout() {
+  stopSharingLocation();
+  clearInterval(mapPollTimer); clearInterval(contactsPollTimer);
+  clearInterval(messagesPollTimer); clearInterval(incomingCallPollTimer);
+  clearInterval(paywallPollTimer);
+  localStorage.removeItem("pr_current");
+  currentUser = null;
+  document.getElementById("scr-app").classList.add("hidden");
+  document.getElementById("bottomnav").classList.add("hidden");
+  document.getElementById("prevnextbar").classList.add("hidden");
+  document.getElementById("scr-paywall").classList.add("hidden");
+  document.getElementById("scr-auth").classList.add("active");
+  location.reload();
+}
+
+let paywallPollTimer = null;
+function enterApp() {
+  // Verifie toujours l'etat a jour (blocage/paiement) avant d'entrer
+  fbGet("/pr_users/" + currentUser.id, fresh => {
+    if (!fresh) return;
+    currentUser = fresh;
+    localStorage.setItem("pr_current", JSON.stringify(fresh));
+    if (fresh.blocked) { showToast("Ce compte a ete bloque par l'administrateur"); doLogout(); return; }
+    document.getElementById("scr-auth").classList.remove("active");
+    if (fresh.paymentStatus !== "active") { showPaywall(); return; }
+    showMainApp();
+  });
+}
+
+let payZone = "ci";
+let selectedOperator = "wave";
+const OPERATOR_INFO = {
+  wave: { nom: "Wave", numero: "+225 07 48 93 56 86" },
+  mtn: { nom: "MTN Mobile Money", numero: "+225 05 74 53 36 36" },
+  moov: { nom: "Moov Money", numero: "+225 01 73 77 39 39" },
+  orange: { nom: "Orange Money", numero: "+225 07 49 97 09 18" }
+};
+
+function showPaywall() {
+  document.getElementById("scr-app").classList.add("hidden");
+  document.getElementById("bottomnav").classList.add("hidden");
+  document.getElementById("prevnextbar").classList.add("hidden");
+  document.getElementById("scr-paywall").classList.remove("hidden");
+  setPayZone("ci");
+  setOperator("wave");
+  document.getElementById("pay-amount-ci").value = "5000";
+  document.getElementById("pay-mynumber-ci").value = "";
+  document.getElementById("pay-ref-ci").value = "";
+  document.getElementById("pay-amount-intl").value = "";
+  document.getElementById("pay-ref-intl").value = "";
+  hideCiInstructions();
+  updatePaySummary();
+  updatePaywallStatusBox();
+  clearInterval(paywallPollTimer);
+  paywallPollTimer = setInterval(() => {
+    fbGet("/pr_users/" + currentUser.id, fresh => {
+      if (!fresh) return;
+      if (fresh.blocked) { clearInterval(paywallPollTimer); showToast("Votre compte a ete bloque"); doLogout(); return; }
+      if (fresh.paymentStatus === "active") {
+        currentUser = fresh;
+        localStorage.setItem("pr_current", JSON.stringify(fresh));
+        clearInterval(paywallPollTimer);
+        showToast("Votre compte a ete active ! 🎉");
+        document.getElementById("scr-paywall").classList.add("hidden");
+        showMainApp();
+      }
+    });
+  }, 6000);
+}
+
+function updatePaywallStatusBox() {
+  fbGet("/pr_payments/" + currentUser.id, payments => {
+    const box = document.getElementById("pay-status-box");
+    const list = payments ? Object.values(payments).sort((a,b) => b.ts - a.ts) : [];
+    if (list.length && currentUser.paymentStatus !== "active") {
+      box.classList.remove("hidden");
+      box.textContent = "Votre demande a bien ete recue (reference : " + list[0].ref + "). L'administrateur va verifier et activer votre compte sous peu.";
+    } else {
+      box.classList.add("hidden");
+    }
+  });
+}
+
+function setPayZone(zone) {
+  payZone = zone;
+  document.getElementById("zone-ci").classList.toggle("active", zone === "ci");
+  document.getElementById("zone-intl").classList.toggle("active", zone === "intl");
+  document.getElementById("pay-pane-ci").classList.toggle("hidden", zone !== "ci");
+  document.getElementById("pay-pane-intl").classList.toggle("hidden", zone !== "intl");
+}
+
+function setAmountCi(v) {
+  document.getElementById("pay-amount-ci").value = v;
+  updatePaySummary();
+}
+function setOperator(op) {
+  selectedOperator = op;
+  document.querySelectorAll(".operator-card").forEach(c => c.classList.toggle("selected", c.dataset.op === op));
+  updatePaySummary();
+}
+function updatePaySummary() {
+  const info = OPERATOR_INFO[selectedOperator];
+  const amount = gv("pay-amount-ci") || "0";
+  const num = gv("pay-mynumber-ci");
+  document.getElementById("sum-operator").textContent = info.nom;
+  document.getElementById("sum-number").textContent = num ? ("+225 " + num) : "--";
+  document.getElementById("sum-amount").textContent = Number(amount).toLocaleString('fr-FR') + " F";
+}
+
+function showCiInstructions() {
+  const amount = gv("pay-amount-ci");
+  const num = gv("pay-mynumber-ci");
+  if (!amount || Number(amount) < 100) { showToast("Indiquez un montant valide"); return; }
+  if (!num) { showToast("Indiquez votre numero Mobile Money"); return; }
+  const info = OPERATOR_INFO[selectedOperator];
+  document.getElementById("ci-op-name").textContent = info.nom;
+  document.getElementById("ci-op-amount").textContent = Number(amount).toLocaleString('fr-FR') + " F CFA";
+  document.getElementById("ci-op-number").textContent = info.numero;
+  document.getElementById("ci-instructions-block").classList.remove("hidden");
+  document.getElementById("btn-show-ci-instructions").classList.add("hidden");
+  document.getElementById("btn-back-ci").classList.remove("hidden");
+}
+function hideCiInstructions() {
+  document.getElementById("ci-instructions-block").classList.add("hidden");
+  document.getElementById("btn-show-ci-instructions").classList.remove("hidden");
+  document.getElementById("btn-back-ci").classList.add("hidden");
+}
+
+// Soumission automatique quand la reference est collee (copier-coller) et fait plus de 6 caracteres
+document.addEventListener("paste", (e) => {
+  if (!e.target || !e.target.id) return;
+  if (e.target.id === "pay-ref-ci") {
+    setTimeout(() => { if (gv("pay-ref-ci").length > 6) submitPaymentCi(true); }, 30);
+  }
+  if (e.target.id === "pay-ref-intl") {
+    setTimeout(() => { if (gv("pay-ref-intl").length > 6) submitPaymentIntl(true); }, 30);
+  }
+});
+
+function submitPaymentCi(fromPaste) {
+  const ref = gv("pay-ref-ci");
+  if (!ref) { showToast("Indiquez la reference recue apres paiement"); return; }
+  const info = OPERATOR_INFO[selectedOperator];
+  const entry = {
+    uid: currentUser.id, nom: currentUser.nom, tel: currentUser.tel,
+    zone: "ci", method: info.nom, amount: gv("pay-amount-ci") + " F CFA",
+    myNumber: "+225 " + gv("pay-mynumber-ci"),
+    ref, ts: nowTs(), status: "pending", auto: !!fromPaste
+  };
+  finalizePayment(entry);
+}
+function submitPaymentIntl(fromPaste) {
+  const ref = gv("pay-ref-intl");
+  const amount = gv("pay-amount-intl");
+  if (!amount) { showToast("Indiquez le montant envoye"); return; }
+  if (!ref) { showToast("Indiquez la reference de transaction"); return; }
+  const entry = {
+    uid: currentUser.id, nom: currentUser.nom, tel: currentUser.tel,
+    zone: "intl", method: document.getElementById("pay-method-intl").value,
+    amount, ref, ts: nowTs(), status: "pending", auto: !!fromPaste
+  };
+  finalizePayment(entry);
+}
+function finalizePayment(entry) {
+  const id = genUid("PAY-");
+  fbSet("/pr_payments/" + entry.uid + "/" + id, entry, (ok) => {
+    if (!ok) { showToast("Erreur d'envoi, verifiez votre connexion"); return; }
+    showToast("Demande envoyee — l'administrateur va verifier et activer votre compte");
+    updatePaywallStatusBox();
+  });
+}
+function showMainApp() {
+  document.getElementById("scr-app").classList.remove("hidden");
+  document.getElementById("bottomnav").classList.remove("hidden");
+  document.getElementById("prevnextbar").classList.remove("hidden");
+  history.replaceState({ layer: "tab", screen: "map" }, "", "#map");
+  document.getElementById("me-nom").textContent = currentUser.nom;
+  document.getElementById("me-pseudo").textContent = "@" + currentUser.pseudo;
+  renderMyAvatar();
+  document.getElementById("set-nom").value = currentUser.nom;
+  document.getElementById("set-tel").value = currentUser.tel;
+  document.getElementById("set-email").value = currentUser.email || "";
+  document.getElementById("set-bio").value = currentUser.bio || "";
+  document.getElementById("set-biz-name").value = currentUser.bizName || "";
+  document.getElementById("set-biz-desc").value = currentUser.bizDesc || "";
+  document.getElementById("set-biz-hours").value = currentUser.bizHours || "";
+  document.getElementById("set-biz-addr").value = currentUser.bizAddr || "";
+  document.getElementById("away-msg-input").value = currentUser.awayMsg || "";
+  document.getElementById("chk-away").checked = !!currentUser.awayMode;
+  document.getElementById("me-created").textContent = new Date(currentUser.createdAt).toLocaleDateString('fr-FR');
+  updateStatusPill();
+  renderContactAdminButtons();
+  initMap();
+  refreshContacts();
+  refreshMessagesList();
+  refreshStatuses();
+  startIncomingCallListener();
+  loadAppLogo();
+  fbPatch("/pr_presence/" + currentUser.id, { online: true, lastSeen: nowTs() });
+  window.addEventListener("beforeunload", () => {
+    fbPatch("/pr_presence/" + currentUser.id, { online: false, lastSeen: nowTs() });
+  });
+  setInterval(() => fbPatch("/pr_presence/" + currentUser.id, { online: true, lastSeen: nowTs() }), 25000);
+}
+
+function renderMyAvatar() {
+  const el = document.getElementById("me-avatar");
+  if (currentUser.photo) { el.style.backgroundImage = "url(" + currentUser.photo + ")"; el.style.backgroundSize = "cover"; el.style.backgroundPosition = "center"; el.textContent = ""; }
+  else { el.style.backgroundImage = ""; el.textContent = initials(currentUser.nom); }
+}
+
+function updateStatusPill() {
+  const pill = document.getElementById("my-status-pill");
+  const txt = document.getElementById("my-status-txt");
+  if (currentUser.awayMode) {
+    pill.classList.add("away");
+    txt.textContent = "Absent(e)";
+  } else {
+    pill.classList.remove("away");
+    txt.textContent = "Disponible";
+  }
+}
+
+function togglePwd(inputId, btn) {
+  const inp = document.getElementById(inputId);
+  const showing = inp.type === "text";
+  inp.type = showing ? "password" : "text";
+  btn.classList.toggle("on", !showing);
+  btn.textContent = showing ? "👁️" : "🔒";
+}
+
+// ------------------------------------------------------------------
+// 5) NAVIGATION
+// ------------------------------------------------------------------
+function goScreen(name, fromPop) {
+  document.querySelectorAll("#scr-app .screen").forEach(s => s.classList.remove("active"));
+  document.getElementById("scr-" + name).classList.add("active");
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.toggle("active", b.dataset.s === name));
+  if (name === "map") {
+    setTimeout(() => {
+      if (mapProvider === "google" && gMap) google.maps.event.trigger(gMap, "resize");
+      else if (map) map.invalidateSize();
+    }, 150);
+  }
+  if (!fromPop) {
+    history.replaceState({ layer: "tab", screen: name }, "", "#" + name);
+  }
+  currentTabName = name;
+}
+const TAB_ORDER = ["map", "contacts", "statuses", "calls", "messages", "settings"];
+let currentTabName = "map";
+function goPrevTab() {
+  const i = TAB_ORDER.indexOf(currentTabName);
+  const prev = TAB_ORDER[(i - 1 + TAB_ORDER.length) % TAB_ORDER.length];
+  goScreen(prev);
+}
+function goNextTab() {
+  const i = TAB_ORDER.indexOf(currentTabName);
+  const next = TAB_ORDER[(i + 1) % TAB_ORDER.length];
+  goScreen(next);
+}
+function goHomeFromAnywhere() {
+  // Ferme toute fenetre ouverte par-dessus (chat/admin) puis revient a l'accueil
+  history.go(-(history.state && history.state.layer === "overlay" ? 1 : 0));
+  setTimeout(() => goScreen("map"), 60);
+}
+function confirmLogout() {
+  if (confirm("Voulez-vous vraiment vous deconnecter ?")) doLogout();
+}
+
+// Un navigateur ne peut fermer par lui-meme qu'un onglet qu'IL a ouvert par script —
+// c'est une regle de securite commune a toutes les apps web, pas une limite de cette app.
+// On tente quand meme la fermeture, et on guide la personne si ca ne marche pas.
+function attemptQuitApp() {
+  window.close();
+  setTimeout(() => {
+    showToast("Utilisez le bouton Accueil ou Applications recentes de votre telephone pour fermer l'app");
+  }, 300);
+}
+
+// ------------------------------------------------------------------
+// NAVIGATION : le bouton retour du telephone reste DANS l'application
+// (chat/admin sont des "calques" empiles sur l'onglet en cours, au lieu
+// de fermer directement le navigateur/l'app installee)
+// ------------------------------------------------------------------
+window.addEventListener("popstate", (e) => {
+  const chatOpen = document.getElementById("scr-chat").classList.contains("open");
+  const adminOpen = !document.getElementById("scr-admin").classList.contains("hidden");
+  const state = e.state || { layer: "tab", screen: "map" };
+  if (state.layer !== "overlay") {
+    if (chatOpen) doCloseChatUI();
+    if (adminOpen) doCloseAdminUI();
+    if (currentUser && !document.getElementById("scr-app").classList.contains("hidden")) {
+      goScreen(state.screen || "map", true);
+    }
+  }
+});
+
+// ------------------------------------------------------------------
+// 6) CARTE & LOCALISATION (consentement mutuel obligatoire)
+// ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// ABSTRACTION CARTE : utilise Google Maps si une cle API est configuree
+// dans l'espace admin, sinon retombe automatiquement sur OpenStreetMap
+// (gratuit, sans cle, fonctionne partout des le depart).
+// ------------------------------------------------------------------
+let mapProvider = "leaflet";
+let gMap = null;
+let myMarkerStore = {};
+let contactMarkerStore = {};
+
+// ---- Sources de tuiles gratuites pour les 3 vues (Defaut / Satellite / Relief) ----
+const TILE_LAYERS = {
+  default:   { url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", options: { attribution: "&copy; OpenStreetMap", maxZoom: 19 } },
+  satellite: { url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", options: { attribution: "Tiles &copy; Esri", maxZoom: 19 } },
+  terrain:   { url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", options: { attribution: "&copy; OpenTopoMap", maxZoom: 17 } }
+};
+let currentTileLayer = null;
+
+function loadGoogleMapsScript(key) {
+  return new Promise((resolve, reject) => {
+    if (window.google && window.google.maps) return resolve();
+    window.__onGMapsReady = () => resolve();
+    const s = document.createElement("script");
+    s.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) + "&libraries=places&callback=__onGMapsReady";
+    s.onerror = () => reject(new Error("Echec de chargement de Google Maps"));
+    document.head.appendChild(s);
+  });
+}
+
+async function initMap() {
+  let gKey = null;
+  try { gKey = await new Promise(res => fbGet("/pr_config/googleMapsKey", res)); } catch(e) {}
+  if (gKey) {
+    try {
+      await loadGoogleMapsScript(gKey);
+      mapProvider = "google";
+      initGoogleMap();
+      mapPollTimer = setInterval(refreshContactsOnMap, 5000);
+      refreshContactsOnMap();
+      return;
+    } catch (e) {
+      showToast("Google Maps indisponible, utilisation de la carte gratuite");
+      mapProvider = "leaflet";
+    }
+  } else {
+    mapProvider = "leaflet";
+  }
+  initLeafletMap();
+  mapPollTimer = setInterval(refreshContactsOnMap, 5000);
+  refreshContactsOnMap();
+}
+
+function initGoogleMap() {
+  gMap = new google.maps.Map(document.getElementById("map"), {
+    center: { lat: 6.827, lng: -5.289 }, zoom: 6,
+    mapTypeControl: true, streetViewControl: true, fullscreenControl: true, zoomControl: true
+  });
+  document.querySelectorAll('[id^="layer-"]').forEach(b => b.classList.add("hidden")); // Google fournit deja ses propres boutons de vue
+  navigator.geolocation && navigator.geolocation.getCurrentPosition(pos => {
+    gMap.setCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+    gMap.setZoom(13);
+  }, () => {}, { timeout: 5000 });
+}
+
+function initLeafletMap() {
+  map = L.map("map", { zoomControl: true }).setView([6.827, -5.289], 6); // Cote d'Ivoire par defaut
+  document.querySelectorAll('[id^="layer-"]').forEach(b => b.classList.remove("hidden"));
+  setMapLayer("default");
+  navigator.geolocation && navigator.geolocation.getCurrentPosition(pos => {
+    map.setView([pos.coords.latitude, pos.coords.longitude], 13);
+  }, () => {}, { timeout: 5000 });
+}
+
+// Change la vue de carte (Defaut / Satellite / Relief) — uniquement en mode gratuit (Leaflet)
+function setMapLayer(name) {
+  if (!map || mapProvider !== "leaflet") return;
+  if (currentTileLayer) map.removeLayer(currentTileLayer);
+  const cfg = TILE_LAYERS[name] || TILE_LAYERS.default;
+  currentTileLayer = L.tileLayer(cfg.url, cfg.options).addTo(map);
+  ["default", "satellite", "terrain"].forEach(n => {
+    const b = document.getElementById("layer-" + n);
+    if (b) b.classList.toggle("btn-primary", n === name);
+  });
+}
+
+// Place ou deplace un marqueur, quel que soit le fournisseur de carte actif
+function mapUpsertMarker(store, key, lat, lng, opts) {
+  opts = opts || {};
+  if (mapProvider === "google") {
+    if (store[key]) { store[key].setPosition({ lat, lng }); }
+    else {
+      store[key] = new google.maps.Marker({
+        position: { lat, lng }, map: gMap, title: opts.title || "",
+        label: opts.initials ? { text: opts.initials, color: "#fff", fontWeight: "700", fontSize: "11px" } : undefined,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE, scale: 16,
+          fillColor: opts.color || "#4A3AFF", fillOpacity: 1, strokeColor: "#fff", strokeWeight: 3
+        }
+      });
+    }
+  } else {
+    if (store[key]) { store[key].setLatLng([lat, lng]); }
+    else if (opts.isMe) {
+      store[key] = L.circleMarker([lat, lng], { radius: 9, color: opts.color || "#4A3AFF", fillColor: opts.color || "#6A5AFF", fillOpacity: 0.9, weight: 3 }).addTo(map).bindPopup(opts.title || "");
+    } else {
+      store[key] = L.marker([lat, lng], {
+        icon: L.divIcon({ className: "", html: 'const CACHE_NAME = "shaman-chooz-v5"; // changez ce numero a chaque mise a jour du code
 const CORE_ASSETS = ["./index.html", "./app.js", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
