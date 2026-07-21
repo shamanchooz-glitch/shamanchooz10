@@ -220,7 +220,6 @@ a{color:inherit}
         <div class="auth-tab active" id="tab-login" onclick="switchAuthTab('login')">Connexion</div>
         <div class="auth-tab" id="tab-register" onclick="switchAuthTab('register')">Inscription</div>
       </div>
-      <button class="btn btn-ghost" style="margin-bottom:20px" onclick="openAdminLogin()">🔐 Espace administrateur</button>
 
       <div id="pane-login">
         <label class="lbl">Pseudo ou telephone</label>
@@ -248,7 +247,9 @@ a{color:inherit}
         <button class="btn btn-primary" style="margin-top:18px" onclick="doRegister()">Creer mon compte</button>
         <p class="muted center" style="margin-top:12px">En creant un compte vous acceptez que votre position ne soit jamais visible par un autre membre tant que vous n'avez pas accepte sa demande.</p>
       </div>
-      <button class="btn btn-ghost" style="margin-top:16px" onclick="attemptQuitApp()">🚪 Quitter</button>
+
+      <button class="btn btn-ghost" style="margin-top:20px" onclick="openAdminLogin()">🔐 Espace administrateur</button>
+      <button class="btn btn-ghost" style="margin-top:12px" onclick="attemptQuitApp()">🚪 Quitter</button>
     </div>
   </div>
 
@@ -714,16 +715,21 @@ a{color:inherit}
 <div id="print-area"></div>
 
 <!-- ============ ADMIN LOGIN ============ -->
-<div id="modal-admin-login" class="modal-bg" onclick="if(event.target===this)closeAdminLogin()">
-  <div class="modal-sheet">
-    <div class="modal-handle"></div>
-    <div class="card-h">🔐 Espace administrateur</div>
-    <label class="lbl">Mot de passe administrateur</label>
+<div id="scr-admin-login" class="hidden" style="position:fixed;inset:0;background:var(--bg);z-index:8100;overflow-y:auto">
+  <div class="auth-wrap">
+    <button class="btn-sm btn-ghost" style="position:absolute;top:18px;left:18px" onclick="closeAdminLogin()" title="Retour a l'accueil">← Accueil</button>
+    <div class="auth-hero">
+      <div class="mark">🔐</div>
+      <h1>Espace administrateur</h1>
+      <p>Reserve a la personne qui gere l'application</p>
+    </div>
+    <label class="lbl" style="font-size:0.9rem">Mot de passe administrateur</label>
     <div class="pwd-wrap">
-      <input class="inp" id="admin-pwd-input" type="password" onkeydown="if(event.key==='Enter')doAdminLogin()"/>
+      <input class="inp" id="admin-pwd-input" type="password" style="font-size:1.05rem;padding:16px" onkeydown="if(event.key==='Enter')doAdminLogin()"/>
       <button type="button" class="pwd-eye" onclick="togglePwd('admin-pwd-input',this)">👁️</button>
     </div>
-    <button class="btn btn-primary" style="margin-top:14px" onclick="doAdminLogin()">Entrer</button>
+    <button class="btn btn-primary" style="margin-top:18px" onclick="doAdminLogin()">Entrer</button>
+    <button class="btn btn-ghost" style="margin-top:12px" onclick="closeAdminLogin()">← Retour a l'accueil</button>
   </div>
 </div>
 
@@ -754,6 +760,13 @@ a{color:inherit}
       <label class="lbl">Email</label>
       <input class="inp" id="admin-contact-email" type="email" placeholder="contact@exemple.com"/>
       <button class="btn btn-ghost" style="margin-top:12px" onclick="saveAdminContact()">💾 Enregistrer mes coordonnees</button>
+    </div>
+
+    <div class="card">
+      <div class="card-h">📍 Suivre un utilisateur en direct</div>
+      <p class="muted" style="margin-bottom:10px">Recherchez par telephone, nom, pseudo ou email. La position ne s'affiche que si la personne a elle-meme active "Partager ma position en direct".</p>
+      <input class="inp" id="admin-track-search" placeholder="Telephone, nom, pseudo ou email..." oninput="adminSearchTrackUsers()"/>
+      <div id="admin-track-results" style="margin-top:10px"></div>
     </div>
 
     <div class="card">
@@ -796,6 +809,15 @@ a{color:inherit}
       <div id="admin-payments-list"></div>
     </div>
   </div>
+</div>
+
+<!-- ============ CARTE DE SUIVI EN DIRECT (ADMIN) ============ -->
+<div id="scr-admin-track-map" class="hidden" style="position:fixed;inset:0;background:#fff;z-index:8300">
+  <div class="topbar">
+    <div class="brand" id="track-map-name">📍</div>
+    <button class="btn-sm btn-ghost" onclick="closeAdminTrackMap()">← Retour</button>
+  </div>
+  <div id="admin-track-map" style="width:100%;height:calc(100vh - 66px)"></div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

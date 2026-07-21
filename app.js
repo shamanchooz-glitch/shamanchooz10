@@ -1663,8 +1663,8 @@ const ADMIN_PWD_DEFAULT = "Shaman123chooz";
 let isAdmin = false;
 let adminTab = "users";
 
-function openAdminLogin() { document.getElementById("modal-admin-login").classList.add("open"); }
-function closeAdminLogin() { document.getElementById("modal-admin-login").classList.remove("open"); }
+function openAdminLogin() { document.getElementById("scr-admin-login").classList.remove("hidden"); }
+function closeAdminLogin() { document.getElementById("scr-admin-login").classList.add("hidden"); document.getElementById("admin-pwd-input").value = ""; }
 
 function doAdminLogin() {
   const pwd = gv("admin-pwd-input");
@@ -1893,10 +1893,87 @@ function printUserSheet(uid) {
   });
 }
 
+// ------------------------------------------------------------------
+// SUIVI EN DIRECT D'UN UTILISATEUR (uniquement si lui-meme a active
+// "Partager ma position en direct" — jamais sans son consentement)
+// ------------------------------------------------------------------
+function adminSearchTrackUsers() {
+  const q = gv("admin-track-search").toLowerCase();
+  const wrap = document.getElementById("admin-track-results");
+  if (!q) { wrap.innerHTML = ""; return; }
+  fbGet("/pr_users", all => {
+    const users = all ? Object.values(all).filter(Boolean) : [];
+    const matches = users.filter(u =>
+      (u.tel || "").toLowerCase().includes(q) ||
+      (u.nom || "").toLowerCase().includes(q) ||
+      (u.pseudo || "").toLowerCase().includes(q) ||
+      (u.email || "").toLowerCase().includes(q)
+    ).slice(0, 10);
+    if (!matches.length) { wrap.innerHTML = '<p class="muted center">Aucun resultat</p>'; return; }
+    let pending = matches.length;
+    const rows = [];
+    matches.forEach(u => {
+      fbGet("/pr_locations/" + u.id, loc => {
+        pending--;
+        const live = !!(loc && loc.sharing && (nowTs() - loc.ts) < 5 * 60000);
+        rows.push({ u, live });
+        if (pending === 0) renderTrackResults(rows);
+      });
+    });
+  });
+}
+function renderTrackResults(rows) {
+  const wrap = document.getElementById("admin-track-results");
+  wrap.innerHTML = rows.map(r => `
+    <div class="contact-row">
+      <div class="avatar" style="${r.u.photo ? 'background-image:url(' + r.u.photo + ');background-size:cover' : ''}">${r.u.photo ? '' : initials(r.u.nom)}</div>
+      <div class="pin-info"><div class="pin-name">${escapeHtml(r.u.nom)}</div><div class="pin-sub">@${escapeHtml(r.u.pseudo)} · ${escapeHtml(r.u.tel || '-')}</div></div>
+      ${r.live
+        ? `<button class="btn-sm" style="background:var(--teal);color:#fff" onclick="adminViewUserLocation('${r.u.id}','${r.u.nom.replace(/'/g,"")}')">📍 Voir en direct</button>`
+        : `<span class="muted" style="font-size:0.7rem;max-width:110px;text-align:right">Position non partagee</span>`}
+    </div>`).join("");
+}
+
+let adminTrackMap = null, adminTrackMarker = null, adminTrackTimer = null;
+function adminViewUserLocation(uid, nom) {
+  document.getElementById("track-map-name").textContent = "📍 " + nom;
+  document.getElementById("scr-admin-track-map").classList.remove("hidden");
+  setTimeout(() => {
+    if (!adminTrackMap) {
+      adminTrackMap = L.map("admin-track-map").setView([6.827, -5.289], 6);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap", maxZoom: 19 }).addTo(adminTrackMap);
+    } else {
+      adminTrackMap.invalidateSize();
+    }
+    updateAdminTrackPosition(uid, true);
+    clearInterval(adminTrackTimer);
+    adminTrackTimer = setInterval(() => updateAdminTrackPosition(uid, false), 5000);
+  }, 100);
+}
+function updateAdminTrackPosition(uid, firstLoad) {
+  fbGet("/pr_locations/" + uid, loc => {
+    if (!loc || !loc.sharing) {
+      showToast("Cette personne ne partage plus sa position");
+      closeAdminTrackMap();
+      return;
+    }
+    if (adminTrackMarker) adminTrackMarker.setLatLng([loc.lat, loc.lng]);
+    else adminTrackMarker = L.circleMarker([loc.lat, loc.lng], { radius: 10, color: "#4A3AFF", fillColor: "#6A5AFF", fillOpacity: 0.9, weight: 3 }).addTo(adminTrackMap);
+    if (firstLoad) adminTrackMap.setView([loc.lat, loc.lng], 15);
+    else adminTrackMap.panTo([loc.lat, loc.lng]);
+  });
+}
+function closeAdminTrackMap() {
+  clearInterval(adminTrackTimer);
+  document.getElementById("scr-admin-track-map").classList.add("hidden");
+}
+
 function openAdminUserDetail(uid) {
   fbGet("/pr_users/" + uid, u => {
     if (!u) return;
     fbGet("/pr_payments/" + uid, payments => {
+      fbGet("/pr_locations/" + uid, loc => {
+      const live = !!(loc && loc.sharing && (nowTs() - loc.ts) < 5 * 60000);
       const list = payments ? Object.values(payments).sort((a,b) => b.ts - a.ts) : [];
       let html = `
         <div class="center" style="margin-bottom:16px">
@@ -1905,6 +1982,10 @@ function openAdminUserDetail(uid) {
           <div class="muted">@${escapeHtml(u.pseudo)} · ${escapeHtml(u.tel||'')}</div>
           <div class="muted" style="margin-top:4px">${u.paymentStatus === 'active' ? '✅ Compte actif' : '⏳ Non actif'} ${u.blocked ? '· 🚫 Bloque' : ''}</div>
         </div>
+        <div class="lbl" style="margin-top:0">Position en direct</div>
+        ${live
+          ? `<button class="btn btn-teal" style="margin-bottom:14px" onclick="closeProfileModal();adminViewUserLocation('${u.id}','${u.nom.replace(/'/g,"")}')">📍 Voir sa position en direct</button>`
+          : `<p class="muted" style="margin-bottom:14px">Cette personne ne partage pas sa position en ce moment.</p>`}
         <div class="lbl" style="margin-top:0">Contacter cette personne</div>
         ${renderCommButtons(u.tel, u.email)}
         <div class="lbl">Gerer le compte</div>
@@ -1935,6 +2016,7 @@ function openAdminUserDetail(uid) {
       }
       document.getElementById("profile-modal-body").innerHTML = html;
       document.getElementById("modal-profile").classList.add("open");
+      });
     });
   });
 }
